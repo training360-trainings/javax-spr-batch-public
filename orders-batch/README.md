@@ -8,6 +8,7 @@
     │   ├── orderFileReader: FlatFileItemReader
     │   ├── :CompositeItemProcessorBuilder
     │   │   ├── orderLineFilterProcessor: custom
+    │   │   ├── orderLineValidatorProcessor: custom
     │   │   └── orderLineToOrderEntityProcessor: custom
     │   └── orderWriter: RepositoryItemWriter
     └── enrichmentStep

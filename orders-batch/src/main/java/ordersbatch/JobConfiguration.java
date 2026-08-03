@@ -11,6 +11,7 @@ import org.springframework.batch.core.step.Step;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.core.step.tasklet.SystemCommandTasklet;
 import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.infrastructure.item.ItemProcessor;
 import org.springframework.batch.infrastructure.item.ItemWriter;
 import org.springframework.batch.infrastructure.item.data.RepositoryItemReader;
 import org.springframework.batch.infrastructure.item.data.RepositoryItemWriter;
@@ -22,13 +23,19 @@ import org.springframework.batch.infrastructure.item.database.builder.JdbcBatchI
 import org.springframework.batch.infrastructure.item.file.FlatFileItemReader;
 import org.springframework.batch.infrastructure.item.file.builder.FlatFileItemReaderBuilder;
 import org.springframework.batch.infrastructure.item.support.builder.CompositeItemProcessorBuilder;
+import org.springframework.batch.infrastructure.item.validator.BeanValidatingItemProcessor;
+import org.springframework.batch.infrastructure.item.validator.ValidatingItemProcessor;
+import org.springframework.batch.infrastructure.item.validator.ValidationException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.retry.RetryPolicy;
 import org.springframework.data.domain.Sort;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.interceptor.DefaultTransactionAttribute;
+import org.springframework.transaction.interceptor.TransactionAttribute;
 
 import javax.sql.DataSource;
 import java.time.Duration;
@@ -65,6 +72,7 @@ public class JobConfiguration {
     public Step copyFileStep(Tasklet copyFileTasklet) {
         return new StepBuilder("copyFileStep", jobRepository)
                 .tasklet(copyFileTasklet)
+                .allowStartIfComplete(true)
                 .build();
     }
 
@@ -77,24 +85,37 @@ public class JobConfiguration {
     @Bean
     public Step loadOrdersStep(FlatFileItemReader<OrderLine> orderFileReader,
                                OrderLineFilterProcessor orderLineFilterProcessor,
+                               ItemProcessor<OrderLine, OrderLine> orderLineValidatorProcessor,
                                OrderLineToOrderEntityProcessor orderLineToOrderEntityProcessor,
 //                               EnrichPriceProcessor enrichPriceProcessor,
                                ConverterItemListener converterItemListener,
+                               OrderLineSkipListener orderLineSkipListener,
                                ItemWriter<OrderEntity> orderWriter) {
+        DefaultTransactionAttribute transactionAttribute = new DefaultTransactionAttribute();
+        transactionAttribute.setIsolationLevel(TransactionAttribute.ISOLATION_DEFAULT);
+        transactionAttribute.setTimeout((int) Duration.ofSeconds(5).toSeconds());
+
         return new StepBuilder("loadOrdersStep", jobRepository)
                 .<OrderLine, OrderEntity>chunk(10)
                 .transactionManager(platformTransactionManager)
+                .transactionAttribute(transactionAttribute)
                 .reader(orderFileReader)
                 .processor(
                         new CompositeItemProcessorBuilder<OrderLine, OrderEntity>()
                                 .delegates(
                                         orderLineFilterProcessor,
+                                        orderLineValidatorProcessor,
                                         orderLineToOrderEntityProcessor //,
 //                                        enrichPriceProcessor
                                 ).build()
                 )
                 .listener(converterItemListener)
+                .listener(orderLineSkipListener)
                 .writer(orderWriter)
+                .startLimit(4)
+                .faultTolerant()
+                .skip(ValidationException.class)
+                .skipLimit(2)
                 .build();
     }
 
@@ -108,6 +129,17 @@ public class JobConfiguration {
                 .reader(orderReader)
                 .processor(enrichPriceProcessor)
                 .writer(orderWriter)
+                .faultTolerant()
+//                .retry(IllegalStateException.class)
+//                .retryLimit(5)
+                .retryPolicy(
+                        RetryPolicy
+                                .builder()
+                                .includes(IllegalStateException.class)
+                                .maxRetries(5)
+                                .delay(Duration.ofMillis(10))
+                                .build()
+                )
                 .build();
     }
 
@@ -154,8 +186,24 @@ public class JobConfiguration {
     }
 
     @Bean
-    public OrderLineToOrderEntityProcessor orderLineToOrderEntityProcessor() {
-        return new OrderLineToOrderEntityProcessor();
+    public ItemProcessor<OrderLine, OrderLine> orderLineValidatorProcessor() {
+        return new BeanValidatingItemProcessor<>();
+    }
+
+//    @Bean
+//    public ItemProcessor<OrderLine, OrderLine> orderLineValidatorProcessor(OrderLineQuantityValidator orderLineQuantityValidator) {
+//        return new ValidatingItemProcessor<>(orderLineQuantityValidator);
+//    }
+//
+//    @Bean
+//    public OrderLineQuantityValidator orderLineQuantityValidator() {
+//        return new OrderLineQuantityValidator();
+//    }
+
+    @Bean
+    @StepScope
+    public OrderLineToOrderEntityProcessor orderLineToOrderEntityProcessor(@Value("#{jobParameters['orders.date']}") String date) {
+        return new OrderLineToOrderEntityProcessor(LocalDate.parse(date));
     }
 
     @Bean
@@ -187,6 +235,13 @@ public class JobConfiguration {
 //    public JpaItemWriter<OrderEntity> orderWriter(EntityManagerFactory entityManagerFactory) {
 //        return new JpaItemWriter<>(entityManagerFactory);
 //    }
+
+    @Bean
+    @StepScope
+    public OrderLineSkipListener orderLineSkipListener(OrdersProperties ordersProperties,
+                                                       @Value("#{jobParameters['orders.date']}") String date) {
+        return new OrderLineSkipListener(ordersProperties.stagingDir(), date);
+    }
 
     @Bean
     public ItemWriter<OrderEntity> orderWriter(OrderRepository orderRepository) {

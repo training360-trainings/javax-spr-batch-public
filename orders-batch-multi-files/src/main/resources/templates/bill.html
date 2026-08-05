@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<body>
+
+    Customer's id: <span th:text="${bill.customerId}"></span>
+    Date: <span th:text="${bill.date}"></span>
+
+    <table>
+        <tr th:each="item: ${bill.items}">
+            <td th:text="${item.productId}"></td>
+            <td th:text="${item.quantity}"></td>
+            <td th:text="${item.price}"></td>
+        </tr>
+    </table>
+</body>
+</html>
